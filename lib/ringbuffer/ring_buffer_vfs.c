@@ -202,6 +202,9 @@ long lib_ring_buffer_ioctl(struct file *filp, unsigned int cmd,
 			lib_ring_buffer_switch_remote_empty(buf);
 		return lib_ring_buffer_snapshot(buf, &buf->cons_snapshot,
 					    &buf->prod_snapshot);
+	case RING_BUFFER_SNAPSHOT_SAMPLE_POSITIONS:
+		return lib_ring_buffer_snapshot_sample_positions(buf,
+				&buf->cons_snapshot, &buf->prod_snapshot);
 	case RING_BUFFER_SNAPSHOT_GET_CONSUMED:
 		return put_ulong(buf->cons_snapshot, arg);
 	case RING_BUFFER_SNAPSHOT_GET_PRODUCED:
