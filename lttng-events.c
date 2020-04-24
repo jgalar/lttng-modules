@@ -1659,6 +1659,11 @@ int lttng_metadata_output_channel(struct lttng_metadata_stream *stream,
 			len);
 	lib_ring_buffer_ctx_init(&ctx, chan, NULL, reserve_len,
 			sizeof(char), -1);
+	if (reserve_len < len || stream->metadata_cache->producing != 0) {
+		stream->incomplete = true;
+	} else {
+		stream->incomplete = false;
+	}
 	/*
 	 * If reservation failed, return an error to the caller.
 	 */
@@ -1679,11 +1684,30 @@ end:
 	return ret;
 }
 
+static
+void lttng_metadata_begin(struct lttng_session *session)
+{
+	mutex_lock(&session->metadata_cache->lock);
+	session->metadata_cache->producing++;
+	mutex_unlock(&session->metadata_cache->lock);
+}
+
+static
+void lttng_metadata_end(struct lttng_session *session)
+{
+	mutex_lock(&session->metadata_cache->lock);
+	WARN_ON_ONCE(!session->metadata_cache->producing);
+	session->metadata_cache->producing--;
+	mutex_unlock(&session->metadata_cache->lock);
+}
+
 /*
  * Write the metadata to the metadata cache.
  * Must be called with sessions_mutex held.
  * The metadata cache lock protects us from concurrent read access from
  * thread outputting metadata content to ring buffer.
+ * The content of the printf is printed as a single atomic metadata
+ * transaction.
  */
 int lttng_metadata_printf(struct lttng_session *session,
 			  const char *fmt, ...)
@@ -1703,6 +1727,7 @@ int lttng_metadata_printf(struct lttng_session *session,
 
 	len = strlen(str);
 	mutex_lock(&session->metadata_cache->lock);
+	session->metadata_cache->producing++;
 	if (session->metadata_cache->metadata_written + len >
 			session->metadata_cache->cache_alloc) {
 		char *tmp_cache_realloc;
@@ -1728,6 +1753,7 @@ int lttng_metadata_printf(struct lttng_session *session,
 			session->metadata_cache->metadata_written,
 			str, len);
 	session->metadata_cache->metadata_written += len;
+	session->metadata_cache->producing--;
 	mutex_unlock(&session->metadata_cache->lock);
 	kfree(str);
 
@@ -1737,6 +1763,7 @@ int lttng_metadata_printf(struct lttng_session *session,
 	return 0;
 
 err:
+	session->metadata_cache->producing--;
 	mutex_unlock(&session->metadata_cache->lock);
 	kfree(str);
 	return -ENOMEM;
@@ -2312,6 +2339,8 @@ int _lttng_fields_metadata_statedump(struct lttng_session *session,
 
 /*
  * Must be called with sessions_mutex held.
+ * The entire event metadata is printed as a single atomic metadata
+ * transaction.
  */
 static
 int _lttng_event_metadata_statedump(struct lttng_session *session,
@@ -2324,6 +2353,8 @@ int _lttng_event_metadata_statedump(struct lttng_session *session,
 		return 0;
 	if (chan->channel_type == METADATA_CHANNEL)
 		return 0;
+
+	lttng_metadata_begin(session);
 
 	ret = lttng_metadata_printf(session,
 		"event {\n"
@@ -2374,12 +2405,15 @@ int _lttng_event_metadata_statedump(struct lttng_session *session,
 
 	event->metadata_dumped = 1;
 end:
+	lttng_metadata_end(session);
 	return ret;
 
 }
 
 /*
  * Must be called with sessions_mutex held.
+ * The entire channel metadata is printed as a single atomic metadata
+ * transaction.
  */
 static
 int _lttng_channel_metadata_statedump(struct lttng_session *session,
@@ -2392,6 +2426,8 @@ int _lttng_channel_metadata_statedump(struct lttng_session *session,
 
 	if (chan->channel_type == METADATA_CHANNEL)
 		return 0;
+
+	lttng_metadata_begin(session);
 
 	WARN_ON_ONCE(!chan->header_type);
 	ret = lttng_metadata_printf(session,
@@ -2426,6 +2462,7 @@ int _lttng_channel_metadata_statedump(struct lttng_session *session,
 
 	chan->metadata_dumped = 1;
 end:
+	lttng_metadata_end(session);
 	return ret;
 }
 
@@ -2616,6 +2653,8 @@ int _lttng_session_metadata_statedump(struct lttng_session *session)
 	if (session->metadata_dumped)
 		goto skip_session;
 
+	lttng_metadata_begin(session);
+
 	snprintf(uuid_s, sizeof(uuid_s),
 		"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
 		uuid_c[0], uuid_c[1], uuid_c[2], uuid_c[3],
@@ -2785,6 +2824,7 @@ skip_session:
 	}
 	session->metadata_dumped = 1;
 end:
+	lttng_metadata_end(session);
 	return ret;
 }
 
